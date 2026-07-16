@@ -1,0 +1,346 @@
+// State
+let topologyData = null;
+let lastResults = null;
+let canvas, ctx;
+let selectedSource = null;
+let selectedTarget = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+    canvas = document.getElementById('networkCanvas');
+    if (canvas) {
+        ctx = canvas.getContext('2d');
+        canvas.addEventListener('click', handleCanvasClick);
+        // Initial Draw blank
+        clearCanvas();
+    }
+    
+    // Check if we are on specific result pages and load data from local storage or fetch
+    const path = window.location.pathname;
+    if (path === '/existing' || path === '/proposed') {
+        loadPageData();
+    }
+});
+
+function clearCanvas() {
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#f9f9f9';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function handleCanvasClick(event) {
+    if (!topologyData) return;
+    
+    const rect = canvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    
+    // Find clicked node
+    const clickedNode = topologyData.topology.nodes.find(node => {
+        // scale coords
+        const nx = node.x * canvas.width;
+        const ny = node.y * canvas.height;
+        const dist = Math.sqrt((nx - x)**2 + (ny - y)**2);
+        return dist < 15; // Hit radius
+    });
+
+    if (clickedNode) {
+        if (selectedSource === null) {
+            selectedSource = clickedNode.id;
+            document.getElementById('sourceNode').value = selectedSource;
+        } else if (selectedTarget === null && clickedNode.id !== selectedSource) {
+            selectedTarget = clickedNode.id;
+            document.getElementById('targetNode').value = selectedTarget;
+        } else {
+            // Reset if both selected
+            selectedSource = clickedNode.id;
+            selectedTarget = null;
+            document.getElementById('sourceNode').value = selectedSource;
+            document.getElementById('targetNode').value = '';
+        }
+        drawTopology(topologyData); // Redraw with selection
+    }
+}
+
+async function runSimulation() {
+    const nodeCount = document.getElementById('nodeCount').value;
+    const areaSize = document.getElementById('areaSize').value;
+    const range = document.getElementById('transRange').value;
+    const source = document.getElementById('sourceNode').value;
+    const target = document.getElementById('targetNode').value;
+
+    const payload = {
+        nodeCount, areaSize, transmissionRange: range,
+        sourceNode: source || 0,
+        targetNode: target || nodeCount - 1
+    };
+
+    document.getElementById('statusMsg').innerText = "Simulating...";
+
+    try {
+        const response = await fetch('/api/run_simulation', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            topologyData = data;
+            lastResults = data;
+            localStorage.setItem('lastSimulation', JSON.stringify(data));
+            
+            drawTopology(data);
+            updateStats(data);
+            document.getElementById('statusMsg').innerText = "Simulation Complete.";
+            document.getElementById('resultsSection').style.display = 'block';
+        } else {
+            document.getElementById('statusMsg').innerText = "Error: " + data.error;
+        }
+
+    } catch (e) {
+        console.error(e);
+        document.getElementById('statusMsg').innerText = "Network Error";
+    }
+}
+
+function drawTopology(data) {
+    clearCanvas();
+    const nodes = data.topology.nodes;
+    const edges = data.topology.edges;
+    
+    // Draw edges
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 1;
+    edges.forEach(edge => {
+        const u = nodes.find(n => n.id === edge.source);
+        const v = nodes.find(n => n.id === edge.target);
+        if (u && v) {
+            ctx.beginPath();
+            ctx.moveTo(u.x * canvas.width, u.y * canvas.height);
+            ctx.lineTo(v.x * canvas.width, v.y * canvas.height);
+            ctx.stroke();
+        }
+    });
+
+    // Draw Existing Path (Suboptimal - Longest Path) - RED Dashed
+    if (data.existing && data.existing.path) {
+        ctx.strokeStyle = '#e74c3c';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([8, 4]);
+        ctx.beginPath();
+        drawPathLine(ctx, data.existing.path, nodes);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    // Draw Proposed Path (Optimal) - Green
+    if (data.proposed && data.proposed.path) {
+        ctx.strokeStyle = '#2ecc71';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        drawPathLine(ctx, data.proposed.path, nodes);
+        ctx.stroke();
+    }
+
+    // Draw nodes
+    nodes.forEach(node => {
+        const cx = node.x * canvas.width;
+        const cy = node.y * canvas.height;
+        
+        ctx.beginPath();
+        ctx.arc(cx, cy, 6, 0, 2 * Math.PI);
+        
+        if (node.id === parseInt(selectedSource)) {
+            ctx.fillStyle = '#3498db'; // Blue Source
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = 'white';
+        } else if (node.id === parseInt(selectedTarget)) {
+            ctx.fillStyle = '#e74c3c'; // Red Target
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = 'white';
+        } else {
+            ctx.fillStyle = '#f39c12'; // Orange default
+        }
+        
+        ctx.fill();
+        ctx.stroke();
+        
+        // Label
+        ctx.fillStyle = '#333';
+        ctx.font = '10px Arial';
+        ctx.fillText(node.id, cx + 8, cy - 8);
+    });
+}
+
+function drawPathLine(ctx, path, nodes) {
+    if (!path || path.length < 2) return;
+    const start = nodes.find(n => n.id === path[0]);
+    ctx.moveTo(start.x * canvas.width, start.y * canvas.height);
+    for (let i = 1; i < path.length; i++) {
+        const next = nodes.find(n => n.id === path[i]);
+        ctx.lineTo(next.x * canvas.width, next.y * canvas.height);
+    }
+}
+
+function updateStats(data) {
+    const p = data.proposed.metrics;
+    document.getElementById('propSpeed').innerText = p.speed;
+    document.getElementById('propDist').innerText = p.distance;
+    document.getElementById('propQos').innerText = p.qos_ratio;
+}
+
+// --- Specific Page Logic ---
+
+function loadPageData() {
+    const dataStr = localStorage.getItem('lastSimulation');
+    if (!dataStr) return;
+    const data = JSON.parse(dataStr);
+    
+    if (document.getElementById('existingChart')) {
+        renderSingleChart('existingChart', data.existing.metrics, 'Existing Protocol Metrics', '#95a5a6');
+        populateTable('existingTableBody', data.existing.metrics);
+    }
+    
+    if (document.getElementById('proposedChart')) {
+        renderSingleChart('proposedChart', data.proposed.metrics, 'Proposed Protocol Metrics', '#e67e22');
+        populateTable('proposedTableBody', data.proposed.metrics, data.existing.metrics);
+    }
+}
+
+function renderSingleChart(elemId, metrics, label, color) {
+    const ctx = document.getElementById(elemId).getContext('2d');
+    new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: ['Speed', 'Distance', 'QoS Ratio', 'Delay', 'Availability'],
+            datasets: [{
+                label: label,
+                data: [metrics.speed, metrics.distance, metrics.qos_ratio, metrics.priority_delay, metrics.service_availability],
+                backgroundColor: color
+            }]
+        },
+        options: { responsive: true }
+    });
+}
+
+function populateTable(tbodyId, metrics, comparisonMetrics = null) {
+    const tbody = document.getElementById(tbodyId);
+    tbody.innerHTML = '';
+    
+    const keys = Object.keys(metrics);
+    keys.forEach(key => {
+        const tr = document.createElement('tr');
+        const val = metrics[key];
+        
+        let statusHtml = '<span style="color:gray">Neutral</span>';
+        if (comparisonMetrics) {
+            const comp = comparisonMetrics[key];
+            const diff = val - comp;
+            // Naive assumption: Higher is better for most, except delay/distance usually
+            // Adjust logic based on key if strictly needed
+            if (key === 'priority_delay' || key === 'distance') {
+                 if (diff < 0) statusHtml = '<span style="color:green; font-weight:bold;">Better (-' + Math.abs(diff.toFixed(1)) + ')</span>';
+                 else statusHtml = '<span style="color:red">Worse</span>';
+            } else {
+                 if (diff > 0) statusHtml = '<span style="color:green; font-weight:bold;">Better (+' + diff.toFixed(1) + ')</span>';
+                 else statusHtml = '<span style="color:red">Worse</span>';
+            }
+        } else {
+            statusHtml = 'Recorded';
+        }
+
+        tr.innerHTML = `
+            <td style="padding:10px; border-bottom:1px solid #eee; text-transform:capitalize;">${key.replace('_', ' ')}</td>
+            <td style="padding:10px; border-bottom:1px solid #eee;">${val}</td>
+            <td style="padding:10px; border-bottom:1px solid #eee;">${statusHtml}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+// Comparison Page Logic
+async function runComparisonSimulation() {
+    const nc = document.getElementById('cmpNodeCount') ? document.getElementById('cmpNodeCount').value : 30;
+    const r = document.getElementById('cmpRange') ? document.getElementById('cmpRange').value : 40;
+    
+    const payload = {
+        nodeCount: nc,
+        areaSize: 100,
+        transmissionRange: r,
+        sourceNode: 0,
+        targetNode: nc - 1
+    };
+
+    try {
+        const response = await fetch('/api/run_simulation', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        
+        renderComparisonCharts(data);
+        updateComparisonTable(data);
+    } catch(e) { console.error(e); }
+}
+
+function renderComparisonCharts(data) {
+    const e = data.existing.metrics;
+    const p = data.proposed.metrics;
+
+    // Speed & Distance
+    new Chart(document.getElementById('speedDistChart'), {
+        type: 'bar',
+        data: {
+            labels: ['Speed (unit)', 'Distance (m)'],
+            datasets: [
+                { label: 'Existing', data: [e.speed, e.distance], backgroundColor: '#95a5a6' },
+                { label: 'Proposed', data: [p.speed, p.distance], backgroundColor: '#e67e22' }
+            ]
+        }
+    });
+
+    // QoS & Availability
+    new Chart(document.getElementById('qosChart'), {
+        type: 'radar',
+        data: {
+            labels: ['QoS Ratio', 'Service Availability', 'Inv. Delay'],
+            datasets: [
+                { label: 'Existing', data: [e.qos_ratio, e.service_availability, 1000/e.priority_delay], borderColor: '#95a5a6', fill: false },
+                { label: 'Proposed', data: [p.qos_ratio, p.service_availability, 1000/p.priority_delay], borderColor: '#e67e22', fill: true, backgroundColor: 'rgba(230, 126, 34, 0.2)' }
+            ]
+        }
+    });
+}
+
+function updateComparisonTable(data) {
+    const tbody = document.getElementById('comparisonTableBody');
+    tbody.innerHTML = '';
+    const metrics = ['speed', 'distance', 'qos_ratio', 'priority_delay', 'service_availability'];
+    
+    metrics.forEach(m => {
+        const eVal = data.existing.metrics[m];
+        const pVal = data.proposed.metrics[m];
+        let outcome = 'Neutral';
+        
+        // Determine winner
+        if (m === 'distance' || m === 'priority_delay') {
+            if (pVal < eVal) outcome = 'Proposed Wins (Lower is better)';
+            else outcome = 'Existing Wins';
+        } else {
+            if (pVal > eVal) outcome = 'Proposed Wins (Higher is better)';
+            else outcome = 'Existing Wins';
+        }
+
+        tbody.innerHTML += `
+            <tr style="background: ${outcome.includes('Proposed') ? '#e6ffe6' : '#fff'}">
+                <td style="padding:10px; border-bottom:1px solid #ccc; text-transform:capitalize;">${m.replace('_', ' ')}</td>
+                <td style="padding:10px; border-bottom:1px solid #ccc;">${eVal}</td>
+                <td style="padding:10px; border-bottom:1px solid #ccc;">${pVal}</td>
+                <td style="padding:10px; border-bottom:1px solid #ccc;"><strong>${outcome}</strong></td>
+            </tr>
+        `;
+    });
+}

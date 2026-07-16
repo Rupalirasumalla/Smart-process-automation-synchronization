@@ -1,0 +1,246 @@
+from flask import Flask, render_template, request, jsonify
+from tinydb import TinyDB, Query
+import networkx as nx
+import random
+import math
+import os
+
+app = Flask(__name__)
+db = TinyDB('db.json')
+
+# Helper to generate graph
+def generate_topology(node_count, area_size, transmission_range):
+    # Create a random geometric graph
+    # positions are in unit square [0,1], scale to area_size
+    # radius is normalized to unit square: range / area_size
+    
+    radius_normalized = transmission_range / area_size
+    # Use seed for reproducibility if needed, but user wants changes on input change
+    G = nx.random_geometric_graph(node_count, radius_normalized)
+    
+    # Add weights (distance)
+    for (u, v) in G.edges():
+        pos_u = G.nodes[u]['pos']
+        pos_v = G.nodes[v]['pos']
+        # Euclidean distance scaled to area size
+        dist = math.sqrt((pos_u[0] - pos_v[0])**2 + (pos_u[1] - pos_v[1])**2) * area_size
+        G.edges[u, v]['weight'] = dist
+        # Add random attribute for QoS simulation
+        G.edges[u, v]['congestion'] = random.uniform(0.1, 0.9)
+
+    return G
+
+def calculate_metrics(G, path, is_proposed=True):
+    if not path:
+        return {
+            'speed': 0,
+            'distance': 0,
+            'qos_ratio': 0,
+            'priority_delay': 0,
+            'service_availability': 0
+        }
+    
+    total_distance = 0
+    total_congestion = 0
+    
+    for i in range(len(path) - 1):
+        u, v = path[i], path[i+1]
+        if G.has_edge(u, v):
+            edge_data = G.edges[u, v]
+            total_distance += edge_data['weight']
+            total_congestion += edge_data.get('congestion', 0.5)
+        else:
+            # Estimate distance for non-adjacent nodes
+            total_distance += 10.0
+            total_congestion += 0.7
+
+    # Simulation Logic for "Proposed should be best"
+    # Proposed: Non-Overlapping (implies multi-path or efficient routing, here modeled as optimal shortest path)
+    # Existing: Two-Way (modeled as having overheads)
+
+    if is_proposed:
+        # Better metrics
+        speed_mps = random.uniform(2.5, 4.0) # Faster robot speed
+        qos_factor = 0.95 
+        delay_overhead = 1.0 # Base delay
+        availability_base = 99.0
+    else:
+        # Worse metrics
+        speed_mps = random.uniform(1.0, 2.0) # Slower
+        qos_factor = 0.70
+        delay_overhead = 1.8 # Higher delay due to "Two Way" handshakes
+        availability_base = 85.0
+
+    # Calculate final metrics
+    distance_metric = round(total_distance, 2)
+    speed_metric = round(speed_mps * (1000 / (total_distance + 1)), 2) # Arbitrary unit
+    
+    # QoS Satisfaction Ratio (higher is better)
+    qos_metric = round(qos_factor * (1 - (total_congestion / len(path))) * 100, 2)
+    
+    # Priority Packet Delay (lower is better)
+    delay_metric = round(total_distance * 0.05 * delay_overhead + random.uniform(5, 15), 2)
+    
+    # Service Availability (higher is better)
+    availability_metric = round(availability_base - (len(path) * 0.5) + random.uniform(0, 2), 2)
+
+    return {
+        'speed': speed_metric,
+        'distance': distance_metric,
+        'qos_ratio': qos_metric,
+        'priority_delay': delay_metric,
+        'service_availability': availability_metric
+    }
+
+@app.route('/')
+def index():
+    return render_template('home.html', active_page='home')
+
+@app.route('/simulation')
+def simulation():
+    return render_template('simulation.html', active_page='simulation')
+
+@app.route('/existing')
+def existing():
+    return render_template('existing.html', active_page='existing')
+
+@app.route('/proposed')
+def proposed():
+    return render_template('proposed.html', active_page='proposed')
+
+@app.route('/robot-operations')
+def robot_operations():
+    return render_template('robot_operations.html', active_page='robot_operations')
+
+@app.route('/api/run_simulation', methods=['POST'])
+def run_simulation():
+    data = request.json
+    node_count = int(data.get('nodeCount', 20))
+    area_size = int(data.get('areaSize', 100))
+    range_val = int(data.get('transmissionRange', 30))
+    source_id = int(data.get('sourceNode', 0))
+    target_id = int(data.get('targetNode', node_count - 1))
+
+    G = generate_topology(node_count, area_size, range_val)
+
+    # Ensure source and target are valid and connected
+    if source_id not in G.nodes or target_id not in G.nodes:
+         # Fallback logic if nodes don't exist in new graph (though we strictly size it)
+         source_id = 0
+         target_id = node_count - 1
+
+    # Check connectivity
+    if not nx.has_path(G, source_id, target_id):
+        return jsonify({'error': 'No path exists between selected nodes with current range. Try increasing range.'}), 400
+
+    # --- PROPOSED ALGORITHM (Non-Overlapping / Optimal) ---
+    # Using A* or Dijkstra for shortest path (Best Performance)
+    proposed_path = nx.shortest_path(G, source_id, target_id, weight='weight')
+    proposed_metrics = calculate_metrics(G, proposed_path, is_proposed=True)
+
+    # --- EXISTING ALGORITHM (Two-Way / Suboptimal) ---
+    # To ensure it is "worse" (longest path / low performance) as requested:
+    # We will try to find a longer path, or just add a huge penalty to the metrics
+    # Here we simulate a "bad routing" by finding the shortest path on a graph 
+    # where edge weights are randomized/corrupted or simply picking a non-optimal path.
+    # Simple trick: Use unweighted shortest path (BFS) which minimizes hops but might maximize distance 
+    # if hops are long, OR just use `all_simple_paths` and pick a longer one (risky for large graphs).
+    # Safer approach for "worse performance": Use the same path or a slightly perturbed one, 
+    # but strictly penalize the calculation in `calculate_metrics` (already done).
+    # AND physically pick a longer path if possible.
+    
+    try:
+        # Try to find a LONGER path for existing protocol (poor performance simulation)
+        # Strategy: remove optimal edges and find alternate longer route
+        G_temp = G.copy()
+        
+        # Remove all edges from optimal path to force a detour
+        for i in range(len(proposed_path) - 1):
+            u, v = proposed_path[i], proposed_path[i+1]
+            if G_temp.has_edge(u, v):
+                G_temp.remove_edge(u, v)
+        
+        if nx.has_path(G_temp, source_id, target_id):
+            # Find path avoiding optimal route - this will be longer
+            existing_path = nx.shortest_path(G_temp, source_id, target_id, weight='weight')
+        else:
+            # If no alternate, try to find any longer simple path
+            try:
+                # Get a few simple paths and pick the longest one
+                paths_gen = nx.all_simple_paths(G, source_id, target_id, cutoff=len(proposed_path) + 5)
+                all_paths = []
+                count = 0
+                for p in paths_gen:
+                    all_paths.append(p)
+                    count += 1
+                    if count > 50:  # Limit to avoid timeout
+                        break
+                
+                if len(all_paths) > 1:
+                    all_paths.sort(key=lambda p: len(p), reverse=True)
+                    existing_path = all_paths[0]
+                else:
+                    existing_path = proposed_path
+            except:
+                existing_path = proposed_path
+            
+    except Exception as e:
+        print(f"Path finding error: {e}")
+        existing_path = proposed_path
+    
+    # Ensure existing path has more nodes than proposed (pad with valid detours)
+    if len(existing_path) <= len(proposed_path) and len(proposed_path) > 2:
+        # Try to add intermediate waypoints via valid edges only
+        extended_path = [existing_path[0]]
+        for i in range(len(existing_path) - 1):
+            current = existing_path[i]
+            next_node = existing_path[i+1]
+            # Find a neighbor of current that also connects to next_node
+            neighbors = list(G.neighbors(current))
+            added_detour = False
+            for n in neighbors:
+                if n not in existing_path and n not in extended_path and n != next_node:
+                    if G.has_edge(n, next_node):
+                        extended_path.append(n)
+                        added_detour = True
+                        break
+            extended_path.append(next_node)
+        if len(extended_path) > len(existing_path):
+            existing_path = extended_path
+
+    existing_metrics = calculate_metrics(G, existing_path, is_proposed=False)
+
+    # Prepare topology data for frontend
+    nodes_data = []
+    for n in G.nodes(data=True):
+        # Scale positions back to canvas coordinates roughly (will handle in frontend, just send 0-1)
+        nodes_data.append({
+            'id': n[0],
+            'x': n[1]['pos'][0],
+            'y': n[1]['pos'][1]
+        })
+
+    edges_data = [{'source': u, 'target': v} for u, v in G.edges()]
+
+    result = {
+        'topology': {
+            'nodes': nodes_data,
+            'edges': edges_data
+        },
+        'proposed': {
+            'path': proposed_path,
+            'metrics': proposed_metrics
+        },
+        'existing': {
+            'path': existing_path,
+            'metrics': existing_metrics
+        }
+    }
+
+    # Save to TinyDB
+    db.insert(result)
+
+    return jsonify(result)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)

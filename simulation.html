@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Industrial Robot Navigation System</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <!-- Chart.js for High End Graphs -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <nav class="navbar">
+        <a href="/" class="navbar-brand">
+            <i class="fas fa-robot"></i>  Synchronization System using Real Time Industrial Wirelesshart Networking
+        </a>
+        <ul class="navbar-nav">
+            <li><a href="/" class="nav-link {% if active_page == 'home' %}active{% endif %}">Home</a></li>
+            <li><a href="/simulation" class="nav-link {% if active_page == 'simulation' %}active{% endif %}">Simulation</a></li>
+            <li><a href="/existing" class="nav-link {% if active_page == 'existing' %}active{% endif %}">Existing Protocol</a></li>
+            <li><a href="/proposed" class="nav-link {% if active_page == 'proposed' %}active{% endif %}">Proposed Protocol</a></li>
+            <li><a href="/robot-operations" class="nav-link {% if active_page == 'robot_operations' %}active{% endif %}">Robot Ops</a></li>
+        </ul>
+    </nav>
+
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
